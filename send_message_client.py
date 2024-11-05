@@ -2,22 +2,37 @@ import asyncio
 import configargparse
 from environs import Env
 from utils import get_logger
+import json
 
 
 async def send_message_chat_client(host, port, token):
+    # Открыли подключение
     reader, writer = await asyncio.open_connection(host, port)
     logger = await get_logger('sender')
 
+    # Вывели стартовое сообщение
+    start_message = await reader.readline()
+    print(start_message.decode().strip())
+
+    # Отправили ключ
     writer.write(f'{token}\n'.encode())
     await writer.drain()
+  
+    # Обработали кривой ключ
+    received_message = await reader.readline()
+    message = received_message.decode().strip()
+    if json.loads(message) is None:
+        message = 'Неизвестный токен. Проверьте его или зарегистрируйте заново.'
+        print(message)
+        logger.error(message)
+        return
 
+    received_message = await reader.readline()
+    message = received_message.decode().strip()
+    print(message)
+
+    # Ожидание сообщений
     try:
-        for _ in range(3):
-            received_message = await reader.readline()
-            message = received_message.decode().strip()
-            logger.debug(message)
-            print(message)
-
         while True:
             message = input('Введите сообщение: ') + '\n\n'
             writer.write(message.encode())
