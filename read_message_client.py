@@ -27,7 +27,7 @@ def main():
     env = Env()
     env.read_env()
     host = env.str("HOST")
-    port = env.int("PORT")
+    port = env.int("READ_PORT")
 
     history_filepath = "minechat_history.txt"
 
