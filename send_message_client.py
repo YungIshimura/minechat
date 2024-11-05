@@ -1,11 +1,12 @@
 import asyncio
-
 import configargparse
 from environs import Env
+from utils import get_logger
 
 
 async def send_message_chat_client(host, port, token):
     reader, writer = await asyncio.open_connection(host, port)
+    logger = await get_logger('sender')
 
     writer.write(f'{token}\n'.encode())
     await writer.drain()
@@ -13,18 +14,19 @@ async def send_message_chat_client(host, port, token):
     try:
         for _ in range(3):
             received_message = await reader.readline()
-            print(received_message.decode().strip())
+            message = received_message.decode().strip()
+            logger.debug(message)
+            print(message)
 
         while True:
             message = input('Введите сообщение: ') + '\n\n'
             writer.write(message.encode())
             await writer.drain()
     except KeyboardInterrupt:
-        print("\nОтключение от сервера.")
+        logger.debug("\nОтключение от сервера.")
     finally:
         writer.close()
         await writer.wait_closed()
-
 
 def main():
     env = Env()
@@ -40,7 +42,6 @@ def main():
     options = p.parse_args()
 
     asyncio.run(send_message_chat_client(options.host, options.port, token))
-
 
 if __name__ == '__main__':
     main()
