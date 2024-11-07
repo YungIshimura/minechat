@@ -8,7 +8,7 @@ from aiofiles.os import wrap
 from environs import Env
 
 
-async def chat_client(host, port, history_filepath):
+async def receive_message_chat_client(host, port, history_filepath):
     reader, _ = await asyncio.open_connection(host, port)
     write_stdout = wrap(sys.stdout.write)
 
@@ -44,7 +44,7 @@ def main():
 
     options = p.parse_args()
 
-    asyncio.run(chat_client(options.host, options.port, options.history))
+    asyncio.run(receive_message_chat_client(options.host, options.port, options.history))
 
 
 if __name__ == "__main__":
