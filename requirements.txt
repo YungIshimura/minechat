@@ -1,3 +1,5 @@
 aiofiles==24.1.0
 environs==11.0.0
 ConfigArgParse==1.7
+anyio==4.6.2
+async-timeout==5.0.1
