@@ -5,6 +5,7 @@ import time
 from typing import Dict
 
 import aiofiles
+from async_timeout import timeout
 
 
 class ConnectionStatus(enum.Enum):
@@ -86,3 +87,12 @@ async def get_queues() -> Dict[str, asyncio.Queue]:
     }
 
     return queues
+
+
+async def ping_server(reader):
+    try:
+        async with timeout(15):
+            response = await reader.readline()
+            return response
+    except asyncio.TimeoutError:
+        return

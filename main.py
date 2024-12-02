@@ -1,27 +1,22 @@
 import asyncio
 import json
 import socket
-from datetime import datetime
 from contextlib import asynccontextmanager
+from datetime import datetime
 from tkinter import TclError, messagebox
 from typing import Any, Dict
 
 import anyio
-from async_timeout import timeout
 from environs import Env
 
 import gui
-from exceptions import InvalidToken
 from consts import INITIATED_TIME
+from exceptions import InvalidToken
 from utils import (
-    ConnectionSource,
-    ConnectionStatus,
-    get_queues,
-    save_message,
-    send_message,
-    update_env_file,
-    update_messages,
-    watch_for_connection,
+    ConnectionSource, ConnectionStatus, 
+    get_queues, ping_server,
+    save_message, send_message, update_env_file,
+    update_messages, watch_for_connection
 )
 
 
@@ -75,15 +70,6 @@ async def monitor_connection(
                 status_updates_queue.put_nowait(gui_class.INITIATED)
         except RuntimeError:
             pass
-
-
-async def ping_server(reader):
-    try:
-        async with timeout(15):
-            response = await reader.readline()
-            return response
-    except asyncio.TimeoutError:
-        return
 
 
 async def read_msgs(host: str, port: int, queues: Dict[str, asyncio.Queue]) -> None:
