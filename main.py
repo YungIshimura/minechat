@@ -12,6 +12,7 @@ from environs import Env
 
 import gui
 from exceptions import InvalidToken
+from consts import INITIATED_TIME
 from utils import (
     ConnectionSource,
     ConnectionStatus,
@@ -25,32 +26,64 @@ from utils import (
 
 
 @asynccontextmanager
-async def connection_manager(host: str, port: int, watchdog_queue: asyncio.Queue, source: ConnectionSource):
+async def connection_manager(host: str, port: int, queues: Dict[str, asyncio.Queue], source: ConnectionSource):
+    watchdog_queue = queues["watchdog_queue"]
+    
     try:
         reader, writer = await asyncio.open_connection(host, port)
         await watch_for_connection(watchdog_queue, ConnectionStatus.ALIVE, source)
         yield reader, writer
-    except (socket.gaierror, asyncio.TimeoutError):
+    except asyncio.TimeoutError:
         await watch_for_connection(watchdog_queue, ConnectionStatus.DEAD, source)
         raise ConnectionError
-    finally:
-        writer.close()
-        await writer.wait_closed()
+    except socket.gaierror:
+        status_updates_queue = queues["status_updates_queue"]
+        status_updates_queue.put_nowait(gui.ReadConnectionStateChanged.INITIATED)
+        status_updates_queue.put_nowait(gui.SendingConnectionStateChanged.INITIATED)
 
 
 async def monitor_connection(
-    reader: asyncio.StreamReader, queue: asyncio.Queue, gui_class: Any, watchdog_queue: asyncio.Queue, source: ConnectionSource
+    host: str,
+    port: int,
+    gui_class: Any,
+    queues: Dict[str, asyncio.Queue],
+    source: ConnectionSource
 ) -> None:
-    
+    status_updates_queue = queues["status_updates_queue"]
+    watchdog_queue = queues["watchdog_queue"]
+    start_ping_time = 0
+
+    while True:
+        try:
+            async with connection_manager(host, port, queues, source) as (reader, _):
+                status_updates_queue.put_nowait(gui_class.ESTABLISHED)
+                while True:
+                    response = await ping_server(reader)
+                    if response:
+                        await watch_for_connection(watchdog_queue, ConnectionStatus.ALIVE, source)
+                    else:
+                        status_updates_queue.put_nowait(gui_class.CLOSED)
+                        await watch_for_connection(watchdog_queue, ConnectionStatus.DEAD, source)
+                        break
+        except ConnectionError:
+            status_updates_queue.put_nowait(gui_class.CLOSED)
+        except socket.gaierror:
+            response = await ping_server(reader)
+            start_ping_time = start_ping_time + 5 if not response else 0
+            
+            if start_ping_time >= INITIATED_TIME:
+                status_updates_queue.put_nowait(gui_class.INITIATED)
+        except RuntimeError:
+            pass
+
+
+async def ping_server(reader):
     try:
-        while True:
-            async with timeout(15):
-                _ = await reader.readline()
-                queue.put_nowait(ConnectionStatus.ALIVE)
-                await watch_for_connection(watchdog_queue, ConnectionStatus.ALIVE, source)
+        async with timeout(15):
+            response = await reader.readline()
+            return response
     except asyncio.TimeoutError:
-        queue.put_nowait(gui_class.CLOSED)
-        await watch_for_connection(watchdog_queue, ConnectionStatus.DEAD, source)
+        return
 
 
 async def read_msgs(host: str, port: int, queues: Dict[str, asyncio.Queue]) -> None:
@@ -61,28 +94,17 @@ async def read_msgs(host: str, port: int, queues: Dict[str, asyncio.Queue]) -> N
 
     while True:
         try:
-            async with connection_manager(host, port, watchdog_queue, ConnectionSource.NEW_MESSAGE) as (reader, _):
+            async with connection_manager(host, port, queues, ConnectionSource.NEW_MESSAGE) as (reader, _):
                 status_updates_queue.put_nowait(gui.ReadConnectionStateChanged.ESTABLISHED)
-                # Так работает
-                # asyncio.create_task(
-                #     monitor_connection(reader, status_updates_queue, gui.ReadConnectionStateChanged, watchdog_queue, ConnectionSource.NEW_MESSAGE)
-                # )
-                async with anyio.create_task_group() as tg:
-                    tg.start_soon(
-                        monitor_connection, reader, status_updates_queue, gui.ReadConnectionStateChanged, watchdog_queue, ConnectionSource.NEW_MESSAGE
-                    )
-                try:
-                    while True:
-                        received_message = await reader.readuntil()
-                        now = datetime.now()
-                        formatted_message = f'[{now.strftime("%d.%m.%Y %H:%M")}] {received_message.decode()}'
-                        messages_queue.put_nowait(formatted_message)
-                        await save_message(history_queue, formatted_message)
-                        await watch_for_connection(watchdog_queue, ConnectionStatus.ALIVE, ConnectionSource.NEW_MESSAGE)
-                except asyncio.TimeoutError:
-                    pass
-        except ConnectionError:
-            status_updates_queue.put_nowait(gui.ReadConnectionStateChanged.CLOSED)
+                while True:
+                    received_message = await reader.readuntil()
+                    now = datetime.now()
+                    formatted_message = f'[{now.strftime("%d.%m.%Y %H:%M")}] {received_message.decode()}'
+                    messages_queue.put_nowait(formatted_message)
+                    await save_message(history_queue, formatted_message)
+                    await watch_for_connection(watchdog_queue, ConnectionStatus.ALIVE, ConnectionSource.NEW_MESSAGE)
+        except RuntimeError:
+            pass
 
 
 async def send_msgs(host: str, port: int, queues: Dict[str, asyncio.Queue], token: str) -> None:
@@ -92,24 +114,20 @@ async def send_msgs(host: str, port: int, queues: Dict[str, asyncio.Queue], toke
 
     while True:
         try:
-            async with connection_manager(host, port, watchdog_queue, ConnectionSource.BEFORE_AUTH) as (reader, writer):
+            async with connection_manager(host, port, queues, ConnectionSource.BEFORE_AUTH) as (reader, writer):
                 nickname = await authorize(reader, writer, token)
                 status_updates_queue.put_nowait(gui.NicknameReceived(nickname))
                 await watch_for_connection(watchdog_queue, ConnectionStatus.ALIVE, ConnectionSource.AUTH)
-                monitor_task = asyncio.create_task(
-                    monitor_connection(reader, status_updates_queue, gui.SendingConnectionStateChanged, watchdog_queue, ConnectionSource.MESSAGE_SENT)
-                )
-                try:
-                    while True:
-                        msg = await sending_queue.get()
-                        if msg:
-                            await send_message(writer, f"{msg}\n\n")
-                            await watch_for_connection(watchdog_queue, ConnectionStatus.ALIVE, ConnectionSource.MESSAGE_SENT)
-                            status_updates_queue.put_nowait(gui.SendingConnectionStateChanged.ESTABLISHED)
-                finally:
-                    monitor_task.cancel()
-        except (ConnectionError, InvalidToken):
+                while True:
+                    msg = await sending_queue.get()
+                    if msg:
+                        await send_message(writer, f"{msg}\n\n")
+                        await watch_for_connection(watchdog_queue, ConnectionStatus.ALIVE, ConnectionSource.MESSAGE_SENT)
+                        status_updates_queue.put_nowait(gui.SendingConnectionStateChanged.ESTABLISHED)
+        except InvalidToken:
             status_updates_queue.put_nowait(gui.SendingConnectionStateChanged.CLOSED)
+        except RuntimeError:
+            pass
 
 
 async def authorize(
@@ -167,13 +185,28 @@ async def main() -> None:
 
     async with anyio.create_task_group() as tg:
         tg.start_soon(update_messages, queues)
+        tg.start_soon(
+            monitor_connection,
+            host,
+            read_port,
+            gui.ReadConnectionStateChanged,
+            queues,
+            ConnectionSource.NEW_MESSAGE,
+        )
+        tg.start_soon(
+            monitor_connection,
+            host,
+            send_port,
+            gui.SendingConnectionStateChanged,
+            queues,
+            ConnectionSource.MESSAGE_SENT,
+        )
         tg.start_soon(read_msgs, host, read_port, queues)
         tg.start_soon(send_msgs, host, send_port, queues, token)
         tg.start_soon(gui.draw, queues)
 
-
 if __name__ == "__main__":
     try:
         asyncio.run(main())
-    except* (TclError, KeyboardInterrupt):
+    except (TclError, KeyboardInterrupt):
         pass
